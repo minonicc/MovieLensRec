@@ -10,54 +10,45 @@ from src.dataset import MovieLensDataset, collate_fn
 from src.model import DualTowerModel
 
 def train():
-    """
-    模型训练主循环。
-    """
-    # 1. 设备选择：优先使用 Mac 的 MPS 加速，其次使用 Nvidia 的 CUDA，最后回退到 CPU
+    # --- 设置全局随机种子以保证实验可复现性 ---
+    import random
+    import numpy as np
+    seed = 42
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
     if torch.backends.mps.is_available():
-        device = torch.device("mps")
-    elif torch.cuda.is_available():
-        device = torch.device("cuda")
-    else:
-        device = torch.device("cpu")
+        torch.mps.manual_seed(seed)
+    if torch.backends.mps.is_available(): device = torch.device("mps")
+    elif torch.cuda.is_available(): device = torch.device("cuda")
+    else: device = torch.device("cpu")
     
     print(f"正在使用的训练设备: {device}")
 
-    # 2. 加载预处理好的元数据
-    with open('data/processed/meta.pkl', 'rb') as f:
-        meta = pickle.load(f)
+    with open('data/processed/meta.pkl', 'rb') as f: meta = pickle.load(f)
 
-    # 3. 数据加载
-    # 在 MacBook Air 上建议将 batch_size 设为 512，全量训练时可调大
     train_dataset = MovieLensDataset('data/processed/train.csv', meta, is_train=True)
     train_loader = DataLoader(train_dataset, batch_size=512, shuffle=True, collate_fn=collate_fn)
 
-    # 4. 模型初始化
     model = DualTowerModel(meta['user_count'], meta['item_count'], meta['genre_count']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
-    # Pointwise 召回本质是二分类任务
     criterion = nn.BCELoss()
 
-    print("开始模型训练...")
+    print("开始增强版模型训练...")
     for epoch in range(5):
         start_time = time.time()
         model.train()
         total_loss = 0
-        # 使用 tqdm 显示进度条
         pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}")
-        for batch_idx, (users, u_hists, items, i_genres, labels) in pbar:
-            # 将数据移动到计算设备
-            users, u_hists = users.to(device), u_hists.to(device)
-            items, i_genres, labels = items.to(device), i_genres.to(device), labels.to(device)
+        for batch_idx, batch in pbar:
+            # 移动所有张量到设备 (共有 8 个张量：4个User侧, 3个Item侧, 1个Label)
+            batch = [t.to(device) for r in batch for t in (r if isinstance(r, list) else [r])]
+            # 解包 (根据 dataset.py 的返回顺序)
+            u_ids, u_hists, u_hgenres, u_stats, i_ids, i_genres, i_stats, labels = batch
 
-            # 前向传播
             optimizer.zero_grad()
-            outputs = model(users, u_hists, items, i_genres)
-            
-            # 计算 Loss (正样本得分接近1，负样本得分接近0)
+            outputs = model(u_ids, u_hists, u_hgenres, u_stats, i_ids, i_genres, i_stats)
             loss = criterion(outputs, labels)
-            
-            # 反向传播与优化
             loss.backward()
             optimizer.step()
             
@@ -65,11 +56,8 @@ def train():
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
         epoch_time = time.time() - start_time
-        avg_loss = total_loss / len(train_loader)
-        print(f"Epoch {epoch+1} 结束。平均 Loss: {avg_loss:.4f} | 耗时: {epoch_time:.2f}s")
-        
-        # 每个 Epoch 结束后保存一次权重
-        torch.save(model.state_dict(), f"tower_model_epoch_{epoch+1}.pth")
+        print(f"Epoch {epoch+1} 结束。平均 Loss: {total_loss/len(train_loader):.4f} | 耗时: {epoch_time:.2f}s")
+        torch.save(model.state_dict(), f"tower_model_v2_epoch_{epoch+1}.pth")
 
 if __name__ == "__main__":
     train()

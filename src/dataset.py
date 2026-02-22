@@ -6,7 +6,7 @@ import random
 
 class MovieLensDataset(Dataset):
     """
-    双塔召回数据集类：实现『50最近+10随机』特征构造。
+    双塔召回数据集类：实现特征增强与长短期混合历史构造。
     """
     def __init__(self, csv_path, meta, neg_ratio=5, is_train=True):
         self.df = pd.read_csv(csv_path)
@@ -17,49 +17,44 @@ class MovieLensDataset(Dataset):
         self.item_count = meta['item_count']
         self.user_sequences = meta['user_sequences']
         self.movie_genres = meta['movie_genres']
+        self.item_feat_map = meta['item_feat_map']
+        self.user_feat_map = meta['user_feat_map']
         
         self.neg_ratio = neg_ratio
         self.is_train = is_train
-        
-        # --- 特征宽度定义 ---
-        self.recent_len = 50
-        self.random_len = 10
-        self.max_hist_len = self.recent_len + self.random_len # 总宽度 60
+        self.max_hist_len = 60 # 50最近 + 10随机
         self.max_genre_len = 6
+        self.max_hist_genre_len = 100 # 用户历史题材展平后的最大长度
 
     def _get_mixed_history(self, full_seq, pos):
-        """
-        核心逻辑：从 pos 之前的序列中，提取 50个最近物品 和 10个随机物品。
-        """
         history_all = full_seq[:pos]
-        if not history_all:
-            return [0] * self.max_hist_len
-        
-        # 1. 提取最近 50 个
-        recent_part = history_all[-self.recent_len:]
-        
-        # 2. 提取远期随机 10 个 (从排除掉最近 50 个之后的剩余部分选)
-        remaining_part = history_all[:-self.recent_len]
-        if len(remaining_part) > self.random_len:
-            random_part = random.sample(remaining_part, self.random_len)
-        else:
-            # 如果剩余不足 10 个，则全取
-            random_part = remaining_part
-            
-        # 3. 合并并 Padding 到 60
-        combined = recent_part + random_part
-        if len(combined) < self.max_hist_len:
-            combined = combined + [0] * (self.max_hist_len - len(combined))
-        return combined
+        if not history_all: return [0] * self.max_hist_len
+        recent = history_all[-50:]
+        rem = history_all[:-50]
+        rand = random.sample(rem, 10) if len(rem) > 10 else rem
+        combined = recent + rand
+        return combined + [0] * (self.max_hist_len - len(combined))
 
-    def _get_padded_genres(self, i_idx):
-        # 获取电影类型列表，并 Padding 到固定长度（6）。如果电影没有类型，则全为 0。
-        g = self.movie_genres.get(i_idx, [])
-        if len(g) > self.max_genre_len: return g[:self.max_genre_len]
-        return g + [0] * (self.max_genre_len - len(g))
+    def _get_item_feats(self, i_idx):
+        # 提取电影的侧向特征桶 ID
+        f = self.item_feat_map.get(i_idx, {})
+        return [f.get('year_bucket', 0), f.get('rating_bucket', 0), f.get('count_bucket', 0)]
 
-    def __len__(self):
-        return len(self.user_idx)
+    def _get_user_feats(self, u_idx):
+        # 提取用户的侧向特征桶 ID
+        f = self.user_feat_map.get(u_idx, {})
+        return [f.get('rating_bucket', 0), f.get('count_bucket', 0)]
+
+    def _get_hist_genres(self, hist_ids):
+        # 获取用户历史序列中所有电影的题材，并展平
+        genres = []
+        for i in hist_ids:
+            if i == 0: continue
+            genres.extend(self.movie_genres.get(i, []))
+        if len(genres) > self.max_hist_genre_len: genres = genres[:self.max_hist_genre_len]
+        return genres + [0] * (self.max_hist_genre_len - len(genres))
+
+    def __len__(self): return len(self.user_idx)
 
     def __getitem__(self, idx):
         u_idx = self.user_idx[idx]
@@ -67,31 +62,37 @@ class MovieLensDataset(Dataset):
         pos = self.pos_in_seq[idx]
         full_seq = self.user_sequences.get(u_idx, [])
         
-        # 获取混合历史特征 (50最近 + 10随机)
         u_hist = self._get_mixed_history(full_seq, pos)
+        u_hist_genres = self._get_hist_genres(u_hist)
+        u_stats = self._get_user_feats(u_idx)
         
         if self.is_train:
             items = [target_i_idx]
-            labels = [1.0]
-            # 负采样
             for _ in range(self.neg_ratio):
                 neg_i = random.randint(1, self.item_count - 1)
-                while neg_i in full_seq: # 严禁负样本出现在用户历史中
-                    neg_i = random.randint(1, self.item_count - 1)
+                while neg_i in full_seq: neg_i = random.randint(1, self.item_count - 1)
                 items.append(neg_i)
-                labels.append(0.0)
             
-            item_genres = [self._get_padded_genres(i) for i in items]
-            return (torch.tensor(u_idx), torch.tensor(u_hist), torch.tensor(items), torch.tensor(item_genres), torch.tensor(labels))
+            i_genres = [self.movie_genres.get(i, [0])[:6] + [0]*(6-len(self.movie_genres.get(i, [0])[:6])) for i in items]
+            i_stats = [self._get_item_feats(i) for i in items]
+            labels = [1.0] + [0.0] * self.neg_ratio
+            
+            return (torch.tensor(u_idx), torch.tensor(u_hist), torch.tensor(u_hist_genres), torch.tensor(u_stats),
+                    torch.tensor(items), torch.tensor(i_genres), torch.tensor(i_stats), torch.tensor(labels))
         else:
-            item_genres = self._get_padded_genres(target_i_idx)
-            return (torch.tensor(u_idx), torch.tensor(u_hist), torch.tensor(target_i_idx), torch.tensor(item_genres))
+            i_genres = self.movie_genres.get(target_i_idx, [0])[:6] + [0]*(6-len(self.movie_genres.get(target_i_idx, [0])[:6]))
+            i_stats = self._get_item_feats(target_i_idx)
+            return (torch.tensor(u_idx), torch.tensor(u_hist), torch.tensor(u_hist_genres), torch.tensor(u_stats),
+                    torch.tensor(target_i_idx), torch.tensor(i_genres), torch.tensor(i_stats))
 
 def collate_fn(batch):
-    u_indices, u_hists, i_indices, i_genres, labels = [], [], [], [], []
+    res = [[] for _ in range(len(batch[0]))]
     for b in batch:
-        u_idx, u_hist, items, genres, lbls = b
-        for i in range(len(items)):
-            u_indices.append(u_idx); u_hists.append(u_hist)
-            i_indices.append(items[i]); i_genres.append(genres[i]); labels.append(lbls[i])
-    return torch.stack(u_indices), torch.stack(u_hists), torch.stack(i_indices), torch.stack(i_genres), torch.stack(labels)
+        # 如果是训练模式，第五个元素(items)是列表
+        if b[4].dim() > 0: 
+            for i in range(len(b[-1])): # 遍历 neg_ratio
+                for k in range(4): res[k].append(b[k]) # User侧
+                for k in range(4, 8): res[k].append(b[k][i]) # Item侧 + Label
+        else:
+            for k in range(len(b)): res[k].append(b[k])
+    return [torch.stack(r) for r in res]
