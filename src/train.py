@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
+from tqdm import tqdm
+import time
 import pickle
 import os
 from src.dataset import MovieLensDataset, collate_fn
@@ -38,9 +40,12 @@ def train():
 
     print("开始模型训练...")
     for epoch in range(5):
+        start_time = time.time()
         model.train()
         total_loss = 0
-        for batch_idx, (users, u_hists, items, i_genres, labels) in enumerate(train_loader):
+        # 使用 tqdm 显示进度条
+        pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}")
+        for batch_idx, (users, u_hists, items, i_genres, labels) in pbar:
             # 将数据移动到计算设备
             users, u_hists = users.to(device), u_hists.to(device)
             items, i_genres, labels = items.to(device), i_genres.to(device), labels.to(device)
@@ -57,11 +62,11 @@ def train():
             optimizer.step()
             
             total_loss += loss.item()
-            if batch_idx % 100 == 0:
-                print(f"Epoch {epoch+1}, Batch {batch_idx}, Loss: {loss.item():.4f}")
+            pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
+        epoch_time = time.time() - start_time
         avg_loss = total_loss / len(train_loader)
-        print(f"Epoch {epoch+1} 结束。平均 Loss: {avg_loss:.4f}")
+        print(f"Epoch {epoch+1} 结束。平均 Loss: {avg_loss:.4f} | 耗时: {epoch_time:.2f}s")
         
         # 每个 Epoch 结束后保存一次权重
         torch.save(model.state_dict(), f"tower_model_epoch_{epoch+1}.pth")
