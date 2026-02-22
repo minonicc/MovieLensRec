@@ -5,7 +5,8 @@ import torch.nn.functional as F
 class DualTowerModel(nn.Module):
     """
     双塔召回模型 (Dual-Tower / DSSM 变体)。
-    实现了 User 塔和 Item 塔的参数共享（用户历史点击 Embedding 复用物品 Embedding）。
+    实现了 User 塔和 Item 塔电参数共享（用户历史点击 Embedding 复用物品 Embedding）。
+    当前版本：采用归一化点积（余弦相似度）计算匹配分。
     """
     def __init__(self, user_count, item_count, genre_count, embed_dim=64):
         super(DualTowerModel, self).__init__()
@@ -42,7 +43,7 @@ class DualTowerModel(nn.Module):
 
     def forward_user(self, user_indices, history_indices):
         """
-        生成用户塔向量。
+        生成归一化后的用户塔向量。
         """
         # 1. 查询用户 ID 向量
         u_emb = self.user_id_embedding(user_indices)
@@ -53,11 +54,14 @@ class DualTowerModel(nn.Module):
         
         # 4. 拼接并通过 MLP
         combined = torch.cat([u_emb, h_emb], dim=-1)
-        return self.user_mlp(combined)
+        out = self.user_mlp(combined)
+        
+        # 5. 核心改动：对输出向量进行 L2 归一化，使其模长为 1，从而实现余弦相似度计算
+        return F.normalize(out, p=2, dim=-1)
 
     def forward_item(self, item_indices, genre_indices):
         """
-        生成物品塔向量。
+        生成归一化后的物品塔向量。
         """
         # 1. 查询电影 ID 向量
         i_emb = self.item_id_embedding(item_indices)
@@ -67,16 +71,21 @@ class DualTowerModel(nn.Module):
         
         # 3. 拼接并通过 MLP
         combined = torch.cat([i_emb, g_emb], dim=-1)
-        return self.item_mlp(combined)
+        out = self.item_mlp(combined)
+        
+        # 4. 核心改动：对输出向量进行 L2 归一化，使其模长为 1，从而实现余弦相似度计算
+        return F.normalize(out, p=2, dim=-1)
 
     def forward(self, user_indices, history_indices, item_indices, genre_indices):
         """
-        训练时的前向传播：计算用户向量与物品向量的内积得分。
+        训练时的前向传播：计算用户向量与物品向量的归一化点积（余弦相似度）。
         """
         u_vec = self.forward_user(user_indices, history_indices)
         i_vec = self.forward_item(item_indices, genre_indices)
         
-        # 向量点积代表相似度
+        # 归一化向量的内积即为余弦相似度，取值范围 [-1, 1]
         logits = torch.sum(u_vec * i_vec, dim=-1)
-        # Pointwise 模式使用 Sigmoid 转化为概率
+        
+        # 使用 Sigmoid 转化为二分类概率
+        # 注意：由于 logits 被限制在 [-1, 1]，sigmoid 输出将在 [0.27, 0.73] 之间
         return torch.sigmoid(logits)

@@ -53,6 +53,7 @@ class MovieLensDataset(Dataset):
         return combined
 
     def _get_padded_genres(self, i_idx):
+        # 获取电影类型列表，并 Padding 到固定长度（6）。如果电影没有类型，则全为 0。
         g = self.movie_genres.get(i_idx, [])
         if len(g) > self.max_genre_len: return g[:self.max_genre_len]
         return g + [0] * (self.max_genre_len - len(g))
