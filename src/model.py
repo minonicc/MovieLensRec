@@ -50,7 +50,7 @@ class DualTowerModel(nn.Module):
 
     def forward_user(self, user_indices, history_indices, hist_genres_indices, user_stats):
         """
-        生成用户塔向量（点积版本）。
+        生成归一化后的用户塔向量（余弦相似度版本）。
         """
         # 1. 基础 Embedding
         u_emb = self.user_id_embedding(user_indices)
@@ -62,11 +62,14 @@ class DualTowerModel(nn.Module):
         uc_emb = self.count_emb(user_stats[:, 1])
         
         combined = torch.cat([u_emb, h_emb, hg_emb, ur_emb, uc_emb], dim=-1)
-        return self.user_mlp(combined)
+        out = self.user_mlp(combined)
+        
+        # 核心改动：对输出向量进行 L2 归一化，使其模长为 1，配合温度系数实现余弦相似度
+        return F.normalize(out, p=2, dim=-1)
 
     def forward_item(self, item_indices, genre_indices, item_stats):
         """
-        生成物品塔向量（点积版本）。
+        生成归一化后的物品塔向量（余弦相似度版本）。
         """
         # 1. 基础 Embedding
         i_emb = self.item_id_embedding(item_indices)
@@ -78,17 +81,20 @@ class DualTowerModel(nn.Module):
         ic_emb = self.count_emb(item_stats[:, 2])
         
         combined = torch.cat([i_emb, g_emb, iy_emb, ir_emb, ic_emb], dim=-1)
-        return self.item_mlp(combined)
+        out = self.item_mlp(combined)
+        
+        # 核心改动：对输出向量进行 L2 归一化，使其模长为 1，配合温度系数实现余弦相似度
+        return F.normalize(out, p=2, dim=-1)
 
     def forward(self, user_indices, history_indices, hist_genres, user_stats,
                 item_indices, genre_indices, item_stats):
         """
-        训练时的前向传播：计算用户向量与物品向量的点积得分。
+        训练时的前向传播：计算用户向量与物品向量的归一化点积（余弦相似度）。
         """
         u_vec = self.forward_user(user_indices, history_indices, hist_genres, user_stats)
         i_vec = self.forward_item(item_indices, genre_indices, item_stats)
         
-        # 向量点积代表相似度
+        # 归一化向量的内积即为余弦相似度，取值范围 [-1, 1]
         logits = torch.sum(u_vec * i_vec, dim=-1)
-        # Pointwise 模式使用 Sigmoid 转化为概率
+        # 注意：此处返回的是未经过温度系数缩放的相似度，缩放逻辑在 train.py 的 InfoNCE 中处理
         return torch.sigmoid(logits)
