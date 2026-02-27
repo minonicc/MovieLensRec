@@ -106,25 +106,27 @@ def preprocess(data_dir='data/ml-32m/', output_dir='data/processed/'):
     # --- 5. 构造样本并采样 (90最近+10随机) ---
     print("执行样本采样逻辑...")
     user_sequences = pos_ratings.groupby('user_idx')['item_idx'].apply(list).to_dict()
+    # 额外存储每个样本对应的原始评分，用于后续质量分析
+    user_ratings_seq = pos_ratings.groupby('user_idx')['rating'].apply(list).to_dict()
     
     train_samples, val_samples, test_samples = [], [], []
     for u_idx, seq in user_sequences.items():
         if len(seq) < 3: continue
+        ratings_seq = user_ratings_seq[u_idx]
         
-        # 留一法：最后1个测试，倒数第2个验证
-        test_samples.append([u_idx, seq[-1], len(seq)-1])
-        val_samples.append([u_idx, seq[-2], len(seq)-2])
+        # 留一法：最后1个测试，倒数第2个验证 (加入原始评分)
+        test_samples.append([u_idx, seq[-1], len(seq)-1, ratings_seq[-1]])
+        val_samples.append([u_idx, seq[-2], len(seq)-2, ratings_seq[-2]])
         
-        # 训练集池子 (排除掉最后两个目标)
+        # 训练集池子
         pool = list(range(1, len(seq)-2))
         if len(pool) <= 100:
             selected = pool
         else:
-            # 90个最近样本 + 10个随机远期样本
             selected = sorted(pool[-90:] + random.sample(pool[:-90], 10))
             
         for i in selected:
-            train_samples.append([u_idx, seq[i], i])
+            train_samples.append([u_idx, seq[i], i, ratings_seq[i]])
 
     print("保存预处理结果...")
     meta = {
@@ -139,9 +141,10 @@ def preprocess(data_dir='data/ml-32m/', output_dir='data/processed/'):
     with open(os.path.join(output_dir, 'meta.pkl'), 'wb') as f:
         pickle.dump(meta, f)
     
-    pd.DataFrame(train_samples, columns=['user_idx', 'item_idx', 'pos']).to_csv(os.path.join(output_dir, 'train.csv'), index=False)
-    pd.DataFrame(val_samples, columns=['user_idx', 'item_idx', 'pos']).to_csv(os.path.join(output_dir, 'val.csv'), index=False)
-    pd.DataFrame(test_samples, columns=['user_idx', 'item_idx', 'pos']).to_csv(os.path.join(output_dir, 'test.csv'), index=False)
+    # 保存时包含 rating 列
+    pd.DataFrame(train_samples, columns=['user_idx', 'item_idx', 'pos', 'rating']).to_csv(os.path.join(output_dir, 'train.csv'), index=False)
+    pd.DataFrame(val_samples, columns=['user_idx', 'item_idx', 'pos', 'rating']).to_csv(os.path.join(output_dir, 'val.csv'), index=False)
+    pd.DataFrame(test_samples, columns=['user_idx', 'item_idx', 'pos', 'rating']).to_csv(os.path.join(output_dir, 'test.csv'), index=False)
     
     print(f"预处理完成！总训练正样本数: {len(train_samples)}")
 
