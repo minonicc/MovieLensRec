@@ -6,6 +6,11 @@ from tqdm import tqdm
 from collections import defaultdict
 import math
 
+# --- 全局配置 ---
+# 相似度分母的幂次：用于控制对热门物品的惩罚力度。
+# 0.5 代表标准余弦相似度；提高到 0.8 或 1.0 可以进一步打压热门，提升长尾召回。
+SIM_EXPONENT = 0.6
+
 def generate_item_cf_matrix(train_path='data/processed/train.csv', output_path='data/processed/item_cf_sim.pkl'):
     """
     基于训练集生成 ItemCF 相似度矩阵（带 IUF 惩罚）。
@@ -41,10 +46,10 @@ def generate_item_cf_matrix(train_path='data/processed/train.csv', output_path='
     
     for i, related_items in tqdm(co_occurrence.items()):
         # 针对每个物品 i，只保留最相似的前 100 个邻居，以节省内存
-        # 归一化公式：w_ij / sqrt(count_i * count_j)
+        # 归一化公式：w_ij / (count_i * count_j)^SIM_EXPONENT
         sim_list = []
         for j, weight in related_items.items():
-            sim = weight / math.sqrt(item_count_dict[i] * item_count_dict[j])
+            sim = weight / math.pow(item_count_dict[i] * item_count_dict[j], SIM_EXPONENT)
             sim_list.append((j, sim))
         
         # 降序排列，取前 100
