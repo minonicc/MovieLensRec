@@ -59,7 +59,7 @@ def evaluate_single_batch(batch_data, item_sim_matrix, user_sequences, k_list):
                     
     return hits, ndcgs
 
-def evaluate_item_cf(k_list=[10, 50, 100]):
+def evaluate_item_cf(k_list=[10, 50, 100, 200, 300, 400, 500]):
     """
     专门针对 ItemCF 召回路进行多进程并行评估。
     """
