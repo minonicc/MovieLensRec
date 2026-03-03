@@ -13,12 +13,12 @@ import pandas as pd
 import random
 
 # --- 全局配置 ---
-# 温度系数：适配余弦相似度 [-1, 1] 范围，通过缩小分母放大相似度差异
+# InfoNCE Loss 的温度系数，用于拉伸余弦相似度的分布，使模型学习更具区分度。
 TEMPERATURE = 0.07  
-# 全局随机负样本数：Batch 内所有用户共享这 N 个负样本，性能极佳
+# 全局随机负样本数：Batch 内所有用户共享这 N 个负样本，性能极佳。
 GLOBAL_NEG_RATIO = 2048 
 
-# 解决 macOS 上由于多个库冲突导致的 OpenMP 重复初始化崩溃问题
+# 解决 macOS 上由于多个库冲突导致的 OpenMP 重复初始化崩溃问题。
 os.environ["KMP_DUPLICATE_LIB_OK"] = "True" 
 
 from src.dataset import MovieLensDataset, train_collate_fn 
@@ -28,6 +28,7 @@ from src.model import DualTowerModel
 def evaluate_fast(model, meta, device, k=50):
     """
     在训练过程中快速计算验证集的 Hit Rate，用于早停判断。
+    该函数在 CPU 上运行以确保 Mac M系列芯片的稳定性。
     """
     model.eval()
     eval_device = torch.device("cpu")
@@ -75,22 +76,22 @@ def evaluate_fast(model, meta, device, k=50):
             batch_df = val_df.iloc[i : i + u_batch_size]
             u_ids = torch.tensor(batch_df["user_idx"].values).to(eval_device)
             
-            u_hists = []
-            u_hgenres = []
-            u_stats = []
+            u_hists, u_hgenres, u_stats = [], [], []
             for u, pos in zip(batch_df["user_idx"], batch_df["pos"]):
+                # 获取 50最近 + 10随机 的混合历史
                 full_seq = user_sequences.get(u, [])[:pos]
-                recent = full_seq[-50:]
-                rem = full_seq[:-50]
+                recent = full_seq[-50:]; rem = full_seq[:-50]
                 rand = random.sample(rem, 10) if len(rem) > 10 else rem
                 h = (recent + rand + [0]*60)[:60]
                 u_hists.append(h)
                 
+                # 题材特征展平
                 hg = []
                 for item_id in h: 
                     if item_id != 0: hg.extend(movie_genres.get(item_id, []))
                 u_hgenres.append((hg[:100] + [0]*100)[:100])
 
+                # 用户侧统计特征
                 f = user_feat_map.get(u, {})
                 u_stats.append([f.get("rating_bucket", 0), f.get("count_bucket", 0)])
             
@@ -108,7 +109,7 @@ def evaluate_fast(model, meta, device, k=50):
 
 def train():
     """
-    模型训练主循环：实现基于『共享负采样』和『究极屏蔽』的高性能 InfoNCE 训练。
+    模型训练主循环：实现集成『共享负采样』和『究极屏蔽』的高性能 InfoNCE 训练。
     """
     import random
     import numpy as np
@@ -125,10 +126,11 @@ def train():
     
     print(f"正在使用的训练设备: {device}")
 
+    # 加载元数据
     with open('data/processed/meta.pkl', 'rb') as f:
         meta = pickle.load(f)
 
-    # 预处理电影特征张量，存储在内存/显存中以提速
+    # 预处理电影特征张量，存储在内存/显存中以提速。
     item_count = meta['item_count']
     movie_genres = meta['movie_genres']
     item_feat_map = meta['item_feat_map']
@@ -141,6 +143,7 @@ def train():
         f = item_feat_map.get(i, {})
         all_stats_mat.append([f.get('year_bucket', 0), f.get('rating_bucket', 0), f.get('count_bucket', 0)])
     
+    # 转换为 Tensor 存储在显存中，用于极速负采样查询
     all_genres_tensor = torch.tensor(all_genres_mat).to(device)
     all_stats_tensor = torch.tensor(all_stats_mat).to(device)
 
@@ -150,6 +153,7 @@ def train():
     model = DualTowerModel(meta['user_count'], meta['item_count'], meta['genre_count']).to(device)
     optimizer = optim.Adam(model.parameters(), lr=0.001)
     
+    # --- 早停机制初始化 ---
     best_hr = 0.0
     patience = 3
     wait = 0
@@ -161,67 +165,70 @@ def train():
         total_loss = 0
         pbar = tqdm(enumerate(train_loader), total=len(train_loader), desc=f"Epoch {epoch+1}")
         
-        for batch_idx, (u_ids, u_hists, u_hgenres, u_stats, t_i_ids, t_i_genres, t_i_stats) in pbar:
-            # 移动数据到训练设备
-            u_ids, u_hists, u_hgenres, u_stats = u_ids.to(device), u_hists.to(device), u_hgenres.to(device), u_stats.to(device)
-            t_i_ids, t_i_genres, t_i_stats = t_i_ids.to(device), t_i_genres.to(device), t_i_stats.to(device)
+        for batch_idx, batch in pbar:
+            # 数据解包：4个User侧特征, 3个正样本Item特征, 3个专属困难样本特征
+            u_ids, u_hists, u_hgenres, u_stats, t_ids, t_genres, t_stats, h_ids, h_genres, h_stats = [t.to(device) for t in batch]
 
             optimizer.zero_grad()
             
-            # --- 步骤 1: 计算用户向量与正样本物品向量 ---
+            # --- 步骤 1: 计算用户向量、正样本物品向量、专属困难负样本向量 ---
             user_embeddings = model.forward_user(u_ids, u_hists, u_hgenres, u_stats) # [Batch_Size, Embed_Dim]
-            positive_item_embeddings = model.forward_item(t_i_ids, t_i_genres, t_i_stats) # [Batch_Size, Embed_Dim]
+            positive_embs = model.forward_item(t_ids, t_genres, t_stats)             # [Batch_Size, Embed_Dim]
+            hard_negative_embs = model.forward_item(h_ids, h_genres, h_stats)       # [Batch_Size, Embed_Dim]
             
-            # --- 步骤 2: 构造所有候选物品池 (正样本 + 共享负样本) ---
-            # 随机生成共享负样本 ID
+            # --- 步骤 2: 生成全局共享随机负样本 (Shared Global Negatives) ---
+            # 这里的优化极大降低了 Item 塔的推理次数，提速显著。
             neg_indices = torch.randint(1, item_count, (GLOBAL_NEG_RATIO,)).to(device)
-            # 计算共享负样本 Embedding
-            negative_item_embeddings = model.forward_item(neg_indices, all_genres_tensor[neg_indices], all_stats_tensor[neg_indices]) # [GLOBAL_NEG_RATIO, Embed_Dim]
+            random_negative_embs = model.forward_item(neg_indices, all_genres_tensor[neg_indices], all_stats_tensor[neg_indices]) # [GLOBAL_NEG_RATIO, Embed_Dim]
             
-            # 拼接正样本和负样本，构建统一候选池 [Batch + GLOBAL_NEG_RATIO, Embed_Dim]
-            all_item_embs = torch.cat([positive_item_embeddings, negative_item_embeddings], dim=0)
-            # 汇总所有候选物品的原始 ID，用于后续构造屏蔽 Mask
-            all_candidate_ids = torch.cat([t_i_ids, neg_indices], dim=0)
+            # --- 步骤 3: 构造完整物品池 ---
+            # 物品池顺序：[正样本(Batch_Size), 专属困难负项(Batch_Size), 共享随机负项(GLOBAL_NEG_RATIO)]
+            all_items = torch.cat([positive_embs, hard_negative_embs, random_negative_embs], dim=0)
+            all_item_ids = torch.cat([t_ids, h_ids, neg_indices], dim=0)
 
-            # --- 步骤 3: 计算所有 (用户, 候选物品) 的相似度 (Logits) ---
-            # logits 形状: [Batch_Size, Batch_Size + GLOBAL_NEG_RATIO]
-            logits = torch.matmul(user_embeddings, all_item_embs.T) / TEMPERATURE
+            # --- 步骤 4: 计算内积得分 (Logits) 并应用温度系数 ---
+            # logits 形状: [Batch_Size, Batch_Size + Batch_Size + GLOBAL_NEG_RATIO]
+            logits = torch.matmul(user_embeddings, all_items.T) / TEMPERATURE
 
-            # --- 步骤 4: 构造『究极 Mask』屏蔽冲突项 ---
-            # 4.1 历史碰撞屏蔽：如果候选物品出现在用户的 60 个特征历史中，则排除。
-            mask_hist = (all_candidate_ids.view(1, -1) == u_hists.unsqueeze(2)).any(dim=1)
-            # 4.2 目标碰撞屏蔽：如果候选物品撞上了本 Batch 的正样本 ID，则排除。
-            mask_target = (all_candidate_ids.view(1, -1) == t_i_ids.view(-1, 1))
-            # 4.3 同用户屏蔽：如果 Batch 内同一用户出现多次，则互相屏蔽。
-            mask_user = torch.cat([
-                (u_ids.unsqueeze(1) == u_ids.unsqueeze(0)), 
-                torch.zeros((u_ids.size(0), GLOBAL_NEG_RATIO), dtype=torch.bool, device=device)
-            ], dim=1)
+            # --- 步骤 5: 构造『隔离对比与究极屏蔽』Mask ---
+            # 5.1 正样本块屏蔽：排除同用户或同物品 ID 的干扰
+            pos_mask = (u_ids.unsqueeze(1) == u_ids.unsqueeze(0)) | (t_ids.unsqueeze(1) == t_ids.unsqueeze(0))
             
-            # 合并 Mask 并确保对角线上的正样本被保留 (fill_diagonal_(False))
-            full_mask = (mask_hist | mask_target | mask_user).fill_diagonal_(False)
+            # 5.2 专属困难块屏蔽：每个用户仅与其对应的一行专属差评 H 对比，屏蔽他人的 H。
+            hard_neg_mask = ~torch.eye(u_ids.size(0), dtype=torch.bool, device=device)
+            # 同时屏蔽掉如果专属困难物品恰好出现在该用户历史特征中的情况
+            h_hist_mask = (h_ids.view(1, -1) == u_hists.unsqueeze(2)).any(dim=1)
+            hard_neg_mask = hard_neg_mask | h_hist_mask
+            
+            # 5.3 共享随机块屏蔽：屏蔽出现在特征历史或正样本目标中的随机负项
+            rand_mask = (neg_indices.view(1, -1) == u_hists.unsqueeze(2)).any(dim=1) | (neg_indices.view(1, -1) == t_ids.unsqueeze(1))
+            
+            # 合并总掩码，并确保对角线上的正样本通过 fill_diagonal_(False) 被正确保留
+            full_mask = torch.cat([pos_mask, hard_neg_mask, rand_mask], dim=1).fill_diagonal_(False)
 
-            # --- 步骤 5: 计算 InfoNCE Loss (Listwise 交叉熵) ---
-            # 正样本在 logits 中的位置即为对角线索引
-            labels = torch.arange(user_embeddings.size(0), dtype=torch.long, device=device)
-            # 使用极小值覆盖冲突项，使其在 Softmax 之后贡献为 0
+            # --- 步骤 6: 计算 InfoNCE Loss (Listwise 交叉熵) ---
+            # 标签设为 Batch 内的对角线索引。
+            labels = torch.arange(u_ids.size(0), dtype=torch.long, device=device)
+            # 使用 masked_fill 将冲突项设为极小值 (-1e9)，使其在 Softmax 分母中不产生贡献
             loss = F.cross_entropy(logits.masked_fill(full_mask, -1e9), labels)
             
-            # --- 反向传播与优化 ---
+            # 反向传播与优化
             loss.backward()
             optimizer.step()
             
             total_loss += loss.item()
             pbar.set_postfix({"loss": f"{loss.item():.4f}"})
 
-        # --- Epoch 统计与早停逻辑 ---
+        # --- Epoch 统计与评估 ---
         epoch_time = time.time() - start_time
         avg_loss = total_loss / len(train_loader)
         print(f"Epoch {epoch+1} 结束。平均 Loss: {avg_loss:.4f} | 耗时: {epoch_time:.2f}s")
 
+        # 快速验证召回率
         current_hr = evaluate_fast(model, meta, device, k=50)
         print(f"Epoch {epoch+1} 验证集 HitRate@50: {current_hr:.4f}")
 
+        # 早停逻辑：如果验证集 Hit Rate 连续 3 代不再增长，则停止
         if current_hr > best_hr:
             best_hr = current_hr
             wait = 0

@@ -50,7 +50,7 @@ def get_hist_genres(hist_ids, movie_genres, max_len=100):
     if len(genres) > max_len: genres = genres[:max_len]
     return genres + [0] * (max_len - len(genres))
 
-def evaluate(model_path, k_list=[10, 50, 100]):
+def evaluate(model_path, k_list=[10, 50, 100, 200, 300, 400, 500]):
     """
     全量召回评估：强制使用 CPU 以确保在 Mac M系列芯片上的稳定性。
     """
