@@ -9,7 +9,7 @@ import pickle
 import faiss
 import random
 from tqdm import tqdm
-from src.model import DualTowerModel
+from ..model import DualTowerModel
 
 def get_mixed_history(full_seq, pos, recent_len=50, random_len=10):
     """
