@@ -6,7 +6,7 @@ import faiss
 import os
 import random
 from tqdm import tqdm
-from ..model import DualTowerModel
+from ..retrieval.model import DualTowerModel
 
 # 解决 macOS 上由于多个库冲突导致的 OpenMP 重复初始化崩溃问题
 os.environ['KMP_DUPLICATE_LIB_OK'] = 'True'
