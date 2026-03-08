@@ -83,9 +83,9 @@ def evaluate_ranking_batch(batch_df, model_path, feature_dims, meta, hit_k_list,
         
         # 序列特征构造
         hist_ids = (snap_items[-50:] + [0]*50)[:50]
-        h_gs = []
+        hist_gs = []
         for h in hist_ids:
-            if h != 0: h_gs.extend(item_idx2genres.get(h, []))
+            if h != 0: hist_gs.extend(item_idx2genres.get(h, []))
         h_gs_trun = (hist_gs[-100:] + [0]*100)[:100]
         u_stats = user_feat_map.get(u_idx, {})
 
