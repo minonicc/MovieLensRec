@@ -67,8 +67,8 @@ def split_and_prepare_exams():
 
     # --- 数据持久化 ---
     print("\n正在持久化轻量级考卷 (Parquet)...")
-    pd.DataFrame(val_rows).to_parquet(os.path.join(OUTPUT_DIR, 'val_exams.parquet'))
-    pd.DataFrame(test_rows).to_parquet(os.path.join(OUTPUT_DIR, 'test_exams_sampled_0.2.parquet'))
+    pd.DataFrame(val_rows).to_parquet(os.path.join(OUTPUT_DIR, 'val_exams_e2e.parquet'))
+    pd.DataFrame(test_rows).to_parquet(os.path.join(OUTPUT_DIR, 'test_exams_e2e.parquet'))
     
     print("正在持久化精简训练池 (Pickle)...")
     with open(os.path.join(OUTPUT_DIR, 'training_pools_only.pkl'), 'wb') as f:
