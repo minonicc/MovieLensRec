@@ -158,15 +158,32 @@ def generate_ranking_dataset():
     u_rts = user_pack['user_ratings_seq']
     
     print(f"启动精排数据生产管线 (用户总数: {len(user_ids)} | 步长限制: n-3)...")
-    final_rows = []
+    all_dfs = []
+    rows_buffer = []
+    total_count = 0
     
     # 采用单线程循环，避免大型字典在多进程间复制导致的挂起与内存爆炸
     for u_idx in tqdm(user_ids, desc="加工进度"):
         user_samples = process_single_user(u_idx, u_seqs, u_rts, training_pools, meta)
-        final_rows.extend(user_samples)
+        rows_buffer.extend(user_samples)
+        
+        # 每积攒 10 万行样本，执行一次分块转换，释放字典占用的零散内存
+        if len(rows_buffer) >= 100000:
+            all_dfs.append(pd.DataFrame(rows_buffer))
+            total_count += len(rows_buffer)
+            rows_buffer = []
             
-    print(f"\n加工流程结束！共产出严谨训练样本: {len(final_rows):,}")
-    df = pd.DataFrame(final_rows)
+    # 处理剩余的样本
+    if rows_buffer:
+        all_dfs.append(pd.DataFrame(rows_buffer))
+        total_count += len(rows_buffer)
+            
+    print(f"\n加工流程结束！共产出严谨训练样本: {total_count:,}")
+    print("正在执行最终合并与落盘 (分块模式下此步将极快)...")
+    
+    # 合并所有分块 DataFrames
+    df = pd.concat(all_dfs, ignore_index=True)
+    
     # 持久化为 Parquet (列式存储)，极大提升后续 DeepFM 的训练吞吐量
     output_file = os.path.join(OUTPUT_DIR, 'train.parquet')
     df.to_parquet(output_file, index=False)
